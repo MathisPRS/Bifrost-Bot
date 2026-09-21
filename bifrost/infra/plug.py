@@ -14,6 +14,8 @@ Deux invariants portes par ce module, et pas ailleurs :
 from __future__ import annotations
 
 import logging
+import socket
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -38,6 +40,10 @@ class PlugCommandFailed(RuntimeError):
     """L'ordre n'a pas ete pris, et on sait le dire."""
 
 
+class PlugIdentityError(RuntimeError):
+    """L'appareil joignable a cette adresse n'est pas celui qu'on croit."""
+
+
 @dataclass(frozen=True)
 class PlugReading:
     ok: bool
@@ -56,16 +62,85 @@ class PlugReading:
 
 
 class PlugClient:
-    def __init__(self, conf: PlugConf, timeout: float = 5.0):
+    """Client d'une prise, identifiee par sa CLE et non par son adresse.
+
+    Le 2026-09-21, les deux prises du reseau ont echange d'adresse en DHCP. La
+    configuration pointait donc l'ordre de coupure sur la prise du NAS — celle
+    qui alimente la machine ou tourne ce bot. Seul le fait que la cle locale
+    Tuya soit propre a chaque appareil a empeche la coupure : la prise a
+    rejete la cle avec une erreur 914.
+
+    On ne depend donc plus de l'adresse. `conf.ip` n'est qu'un POINT DE DEPART :
+    si l'appareil qui y repond n'accepte pas notre cle, on balaie le /24 pour
+    retrouver celui qui l'accepte. Une cle qui dechiffre EST la preuve
+    d'identite — elle est unique par appareil.
+    """
+
+    def __init__(self, conf: PlugConf, timeout: float = 5.0,
+                 forbidden: PlugConf | None = None):
         self.conf = conf
+        self._ip = conf.ip              # adresse courante, peut changer
         self._timeout = timeout
+        # Prise a NE JAMAIS commander (celle du NAS). Sert de controle explicite
+        # avant toute ecriture, pour echouer bruyamment plutot que par hasard.
+        self._forbidden = forbidden
         self._dev: tinytuya.OutletDevice | None = None
+
+    # --- resolution d'adresse ------------------------------------------------
+
+    def _reachable_plugs(self) -> list[str]:
+        """Adresses du /24 qui ecoutent sur le port Tuya local."""
+        base = self._ip.rsplit(".", 1)[0]
+
+        def probe(n: int) -> str | None:
+            ip = f"{base}.{n}"
+            s = socket.socket()
+            s.settimeout(0.6)
+            try:
+                s.connect((ip, 6668))
+                return ip
+            except OSError:
+                return None
+            finally:
+                s.close()
+
+        with ThreadPoolExecutor(max_workers=64) as pool:
+            return [ip for ip in pool.map(probe, range(1, 255)) if ip]
+
+    def _accepts_our_key(self, ip: str) -> bool:
+        d = tinytuya.OutletDevice(dev_id=self.conf.dev_id, address=ip,
+                                  local_key=self.conf.local_key,
+                                  version=self.conf.version)
+        d.set_socketTimeout(self._timeout)
+        try:
+            st = d.status()
+        except Exception:                 # noqa: BLE001
+            return False
+        return isinstance(st, dict) and "dps" in st
+
+    def resolve(self) -> str | None:
+        """Retrouve l'adresse de NOTRE appareil. None si introuvable."""
+        if self._accepts_our_key(self._ip):
+            return self._ip
+        log.warning("prise %s : l'appareil a cette adresse n'accepte pas notre "
+                    "cle — recherche sur le reseau", self._ip)
+        for ip in self._reachable_plugs():
+            if ip == self._ip:
+                continue
+            if self._accepts_our_key(ip):
+                log.warning("prise %s retrouvee a l'adresse %s (l'adresse a change)",
+                            self.conf.dev_id[:8], ip)
+                self._ip = ip
+                self._reset()
+                return ip
+        log.error("prise %s introuvable sur le reseau", self.conf.dev_id[:8])
+        return None
 
     def _device(self) -> tinytuya.OutletDevice:
         if self._dev is None:
             d = tinytuya.OutletDevice(
                 dev_id=self.conf.dev_id,
-                address=self.conf.ip,
+                address=self._ip,
                 local_key=self.conf.local_key,
                 version=self.conf.version,
             )
@@ -78,7 +153,7 @@ class PlugClient:
         # Une session persistante peut rester coincee apres une coupure reseau.
         self._dev = None
 
-    def read(self) -> PlugReading:
+    def read(self, _retry: bool = True) -> PlugReading:
         now = datetime.now(timezone.utc)
         try:
             status = self._device().status()
@@ -89,6 +164,11 @@ class PlugClient:
         if not isinstance(status, dict) or "dps" not in status:
             self._reset()
             err = (status or {}).get("Error", "reponse sans dps") if isinstance(status, dict) else "reponse invalide"
+            # Cle refusee -> ce n'est probablement plus notre appareil a cette
+            # adresse. On tente une resolution, une seule fois.
+            if _retry and "key or version" in str(err).lower():
+                if self.resolve() is not None:
+                    return self.read(_retry=False)
             return PlugReading(ok=False, at=now, error=str(err))
 
         dps = status["dps"]
@@ -127,6 +207,32 @@ class PlugClient:
                 f"prise {self.conf.dev_id} declaree en lecture seule "
                 "(c'est celle qui alimente le NAS)"
             )
+
+        # L'appareil joignable a cette adresse est-il bien le NOTRE ?
+        # Une cle qui dechiffre est une preuve d'identite : elle est unique par
+        # appareil. On l'exige AVANT d'ecrire, jamais apres.
+        if self.resolve() is None:
+            raise PlugIdentityError(
+                f"prise {self.conf.dev_id[:8]}… introuvable sur le reseau : "
+                "aucun appareil n'accepte sa cle. Rien n'a ete commande.")
+
+        # Et surtout : ce n'est pas la prise interdite. Controle redondant avec
+        # le precedent, et c'est voulu — il coute une requete et il transforme
+        # un accident silencieux en refus explicite.
+        if self._forbidden is not None:
+            d = tinytuya.OutletDevice(dev_id=self._forbidden.dev_id, address=self._ip,
+                                      local_key=self._forbidden.local_key,
+                                      version=self._forbidden.version)
+            d.set_socketTimeout(self._timeout)
+            try:
+                st = d.status()
+            except Exception:             # noqa: BLE001
+                st = None
+            if isinstance(st, dict) and "dps" in st:
+                raise PlugIdentityError(
+                    f"REFUS : l'appareil en {self._ip} repond a la cle de la prise "
+                    "protegee (celle du NAS). Les adresses ont probablement change "
+                    "en DHCP. Rien n'a ete commande.")
 
     def _command(self, on: bool, tries: int = 2) -> None:
         """Envoie l'ordre et EXIGE une confirmation.

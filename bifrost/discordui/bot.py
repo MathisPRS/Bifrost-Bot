@@ -100,7 +100,7 @@ class Bifrost(discord.Client):
 
         self.machine = Machine()
         self.store = Store(conf.backup_dest.parent / "bifrost.db")
-        self.plug = PlugClient(conf.plug)
+        self.plug = PlugClient(conf.plug, forbidden=conf.nas_plug)
         self.px = ProxmoxClient(conf.proxmox)
         self.dh = DockerHost(conf.docker_host)
 

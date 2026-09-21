@@ -43,7 +43,7 @@ def cmd_status(conf) -> int:
     print(f"\n\033[1mBifrost — etat au {now.astimezone():%H:%M:%S}\033[0m\n")
 
     # --- prise ---------------------------------------------------------------
-    plug = PlugClient(conf.plug)
+    plug = PlugClient(conf.plug, forbidden=conf.nas_plug)
     r = plug.read()
     mark = OK if r.ok else UNK
     print(f"  {mark} \033[1mPrise\033[0m {conf.plug.ip}   {r}")
@@ -150,7 +150,7 @@ def cmd_status(conf) -> int:
 
 def cmd_power(conf, seconds: int, interval: float) -> int:
     """Releve la courbe de consommation. Sert a calibrer les seuils (phase 4)."""
-    plug = PlugClient(conf.plug)
+    plug = PlugClient(conf.plug, forbidden=conf.nas_plug)
     print(f"releve pendant {seconds} s, toutes les {interval} s — Ctrl-C pour arreter\n")
     t0 = time.time()
     vals: list[float] = []
