@@ -1,0 +1,24 @@
+# Secrets et deploiement — jamais dans git
+# Motif LARGE a dessein : `secrets.env` seul ne couvrait pas les copies de
+# sauvegarde `secrets.env.bak-...`, qui ont failli etre committees.
+secrets.env*
+!secrets.env.example
+*.env
+!*.env.example
+*.bak
+*.bak-*
+config.yaml
+docker-compose.yml
+docker-compose.portainer.yml
+
+# Documentation interne : topologie reelle du homelab
+docs/IMPLEMENTATION.md
+
+# Donnees d'execution : base, sauvegardes de mondes, known_hosts
+data/
+
+# Python
+.venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]

@@ -1,0 +1,80 @@
+# Bifrost — configuration non secrete.
+# Les identifiants sont dans secrets.env (mode 600, jamais versionne).
+
+power:
+  # Faux = la sequence d'extinction va jusqu'au bout mais s'arrete AVANT de
+  # couper la prise. Voir docs/IMPLEMENTATION.md §9.
+  # ACTIVE le 2026-09-19, une fois les seuils calibres sur des mesures reelles
+  # (cf. plus bas) et la separation des prises confirmee.
+  allow_cut: false     # laisser false tant que les seuils ne sont pas mesures
+
+  # Le NAS est-il sur une prise separee de celle du Proxmox ?
+  # allow_cut ne peut pas etre active tant que ceci est faux.
+  nas_on_separate_plug: false     # ne passer a true qu'apres avoir VERIFIE que couper cette prise
+
+  # Seuils A CALIBRER sur VOTRE materiel. Exemple de mesures reelles :
+  #   machine en S5 ......................  0,0 W  <- la prise renvoie zero sous
+  #                                                   son seuil de resolution ;
+  #                                                   les 1-3 W du rail 5VSB ne
+  #                                                   sont pas mesurables
+  #   allumee, rien qui tourne ........... 11,0 W
+  #   allumee, Valheim en marche ......... 26,6 W
+  # Le plancher "allumee" est donc 11 W, pas 26 : ne pas calibrer le seuil de
+  # demarrage sur une machine qui fait tourner le jeu.
+  off_threshold_w: 5.0       # sous ce seuil = machine eteinte
+  on_threshold_w: 5.0        # au-dessus = machine sous tension
+  # Plus de plancher : 0,0 W est une valeur LEGITIME sur ce materiel. La seule
+  # vraie "mesure absente" est une lecture qui echoue, deja traitee en INCONNU.
+  require_drop: true         # exiger une chute observee, pas une valeur absolue
+
+  # Durees de maintien : une condition doit TENIR, pas seulement apparaitre.
+  off_hold_s: 30             # anti-rebond d'un cycle de redemarrage
+  on_hold_s: 10
+  settle_after_off_s: 15     # vidage des caches disque avant coupure
+
+proxmox:
+  node: pve            # nom du node Proxmox
+  vmid: 100                  # VM "Docker" — porte les serveurs de jeu
+  other_vmids: [926]         # doivent aussi etre stopped avant extinction hote
+
+host:
+  ip: 10.0.0.200
+  # L'hote est considere eteint quand ping ET API sont KO pendant cette duree.
+  down_hold_s: 60
+
+vm:
+  ip: 10.0.0.9
+  docker_host: ssh://USER@10.0.0.9   # cle verrouillee sur `docker system dial-stdio`
+
+backup:
+  dest: /data/worlds         # dans le conteneur ; ./data/worlds sur l'hote
+  keep_count: 20
+  keep_days: 30
+  min_size_ratio: 0.5        # refus si la copie fait moins de 50% de la precedente
+
+games:
+  valheim:
+    driver: valheim
+    enabled: true
+    container: valheim
+    world: MonMonde
+    world_dir: /config/worlds_local/MonMonde
+    game_port: 2456
+    query_port: 2457         # port de jeu + 1 — VERIFIE, 2456 ne repond pas
+    stop_timeout_s: 180
+
+  # Presents sur la VM, a l'arret. Declares pour memoire : le jour ou on les
+  # active, seul `driver:` reste a ecrire dans games/.
+  enshrouded:
+    driver: generic
+    enabled: false
+    container: enshrouded
+  sons_of_the_forest:
+    driver: generic
+    enabled: false
+    container: sons-of-the-forest
+
+discord:
+  # Le message de statut est reedite en place plutot que reposte.
+  status_refresh_s: 60
+  countdown_s: 30            # delai annulable avant une sequence destructive

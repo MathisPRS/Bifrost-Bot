@@ -1,0 +1,26 @@
+# Version destinee a l'editeur web de Portainer.
+#
+# Deux differences avec docker-compose.yml :
+#   - pas de `build:` — Portainer en editeur web n'a pas le contexte de build.
+#     L'image doit exister au prealable :
+#         cd /chemin/vers/Bifrost && docker compose build
+#   - chemins ABSOLUS — une stack Portainer ne s'execute pas depuis ce dossier,
+#     donc `./secrets.env` ne pointerait nulle part.
+
+services:
+  bifrost:
+    image: bifrost:latest
+    container_name: bifrost
+    restart: unless-stopped
+    environment:
+      TZ: Europe/Paris
+    volumes:
+      - /chemin/vers/Bifrost/secrets.env:/app/secrets.env:ro
+      - /chemin/vers/Bifrost/config.yaml:/app/config.yaml:ro
+      - /chemin/vers/Bifrost/data:/data
+      - /chemin/vers/.ssh/bifrost_ed25519:/home/bifrost/.ssh/id_ed25519:ro
+    ulimits:
+      nofile: { soft: 8192, hard: 16384 }
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }

@@ -1,0 +1,13 @@
+# Configuration SSH du conteneur. La cle est montee en lecture seule ; le
+# known_hosts vit dans /data pour survivre a une recreation du conteneur.
+Host *
+    IdentityFile /home/bifrost/.ssh/id_ed25519
+    IdentitiesOnly yes
+    StrictHostKeyChecking accept-new
+    UserKnownHostsFile /data/known_hosts
+    BatchMode yes
+    ConnectTimeout 10
+    # Le flux de logs est une connexion longue : on veut detecter sa rupture
+    # plutot que de rester bloque sur une socket morte.
+    ServerAliveInterval 30
+    ServerAliveCountMax 3
