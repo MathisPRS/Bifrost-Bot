@@ -104,17 +104,28 @@ class Orchestrator:
             return Check.yes(f"{avant:.1f} W → {w:.1f} W")
         return Check.yes(f"{w:.1f} W")
 
-    async def _note_watts(self) -> str:
-        """Releve la consommation AVANT de commencer.
+    async def chk_initial_watts(self) -> Check:
+        """Releve la consommation AVANT de commencer — et c'est une PORTE.
 
-        Sert de terme de comparaison a la preuve physique, et atteste au
-        passage que la prise sait mesurer quelque chose.
+        Lecon du 2026-09-21 : c'etait une simple action, qui « reussissait »
+        meme quand la lecture echouait. La sequence a donc eteint toute la
+        machine avant de decouvrir, trois minutes plus tard, qu'elle ne pourrait
+        rien prouver. Machine eteinte, prise allumee : le pire des deux mondes.
+
+        Une precondition se verifie AVANT d'agir. Si on ne sait pas lire la
+        prise maintenant, on ne pourra pas prouver l'extinction tout a l'heure :
+        autant ne rien commencer. La porte reessaie, un echec isole ne doit pas
+        condamner la sequence.
         """
         w = await self._watts("avant")
-        self._watts_before = w
         if w is None:
-            return "lecture indisponible — la preuve physique sera invérifiable"
-        return f"{w:.1f} W"
+            return Check.unknown("lecture de la prise indisponible")
+        self._watts_before = w
+        if w < self.conf.power.on_threshold_w:
+            return Check.no(
+                f"{w:.1f} W — la prise ne mesure deja presque rien, "
+                "la chute serait invérifiable")
+        return Check.yes(f"{w:.1f} W")
 
     async def chk_host_up(self) -> Check:
         ping = await asyncio.to_thread(net.ping, self.conf.host_ip)
@@ -365,7 +376,12 @@ class Orchestrator:
             Stage("Aucun autre jeu en marche",
                   gate=Gate("Aucun autre jeu", self.chk_no_other_game,
                             timeout=20, interval=3)),
-            Stage("Consommation initiale", action=self._note_watts),
+            # Porte, et non action : si la prise est illisible maintenant, la
+            # preuve physique sera impossible plus tard. On refuse d'entamer une
+            # extinction qu'on ne saura pas conclure.
+            Stage("Consommation initiale",
+                  gate=Gate("Prise lisible", self.chk_initial_watts,
+                            timeout=30, interval=3)),
             Stage("Relever la génération", action=self._note_generation),
             Stage("Arrêt du conteneur", action=self._stop_container,
                   gate=Gate("Conteneur arrete proprement",
