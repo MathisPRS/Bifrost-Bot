@@ -295,6 +295,97 @@ class Orchestrator:
         return "ordre d'arret envoye a l'hote"
 
     async def _power_up(self) -> str:
+        """Met la machine sous tension. TROIS cas, jamais deux.
+
+        Lecon du 2026-09-26 : ce code testait `if lecture_ok and prise_eteinte`
+        puis retombait sur le Wake-on-LAN. Une lecture RATEE prenait donc le
+        meme chemin qu'une prise allumee — on envoyait un paquet magique a une
+        machine sans courant, ou aucun rail 5VSB n'ecoute. La porte suivante
+        constatait « eteinte » et la sequence expirait.
+
+        C'est la regle des portes, appliquee ici aussi : INCONNU n'est pas une
+        valeur. On reessaie, et si on ne sait toujours pas, on echoue clairement
+        plutot que de deviner.
+        """
+        r = None
+        for essai in range(3):
+            r = await asyncio.to_thread(self.plug.read)
+            if r.ok:
+                break
+            log.warning("prise illisible (essai %d/3) : %s", essai + 1, r.error)
+            await asyncio.sleep(2)
+
+        if r is None or not r.ok:
+            raise RuntimeError(
+                f"état de la prise inconnu après 3 tentatives ({r.error if r else '?'}) — "
+                "on ne devine pas : rien n'a été commandé")
+
+        if r.on is False:
+            # Prise coupee : la rallumer suffit, le front montant du 5VSB
+            # declenche « Restore on AC Power Loss » et la machine boote.
+            await asyncio.to_thread(self.plug.turn_on)
+            return "prise rallumée — démarrage au retour du courant"
+
+        # Prise deja allumee.
+        if await asyncio.to_thread(self.px.reachable):
+            return "machine déjà en marche"
+
+        # Machine en S5 sans que le courant ait jamais ete coupe : aucun front
+        # montant ne viendra, c'est le paquet magique qui la reveille.
+        if not self.conf.proxmox.mac:
+            raise RuntimeError(
+                "prise déjà allumée et machine éteinte : il faudrait un paquet "
+                "Wake-on-LAN, mais PROXMOX_MAC n'est pas renseigné")
+        await asyncio.to_thread(net.wake_on_lan, self.conf.proxmox.mac)
+        return f"prise déjà allumée — Wake-on-LAN envoyé à {self.conf.proxmox.mac}"
+
+    async def _ensure_vm(self) -> str:
+        """Demarre la VM seulement si elle est reellement a l'arret.
+
+        En temps normal elle revient seule : `onboot: 1` est un drapeau statique
+        que Proxmox relit a chaque demarrage de l'hote, sans memoire de la
+        maniere dont la VM s'etait arretee. Ce filet ne sert donc qu'au cas ou
+        l'autostart serait desactive ou aurait echoue.
+
+        On ne touche a rien tant que l'etat n'est pas franchement `stopped` :
+        un `qm start` lance sur une VM en cours de demarrage se heurterait au
+        verrou de tache, et on ne veut pas transformer un demarrage normal en
+        echec de sequence.
+        """
+        v = await asyncio.to_thread(self.px.vm, self.conf.proxmox.vmid)
+        if v is None:
+            return "état indéterminé — on laisse la porte trancher"
+        if v.status != "stopped":
+            return f"{v.status} — autostart en cours, on laisse faire"
+        try:
+            await asyncio.to_thread(self.px.vm_start, self.conf.proxmox.vmid)
+            return "à l'arrêt malgré onboot — démarrage forcé"
+        except Exception as exc:                        # noqa: BLE001
+            # Souvent « already running » ou un verrou : la porte qui suit
+            # constatera l'etat reel de toute facon.
+            log.warning("demarrage VM refuse (%s) — la porte tranchera", exc)
+            return f"démarrage refusé ({type(exc).__name__}) — la porte tranchera"
+
+    async def _ensure_container(self) -> str:
+        """Demarre le conteneur s'il ne tourne pas deja.
+
+        Idempotent : si la VM l'a relance toute seule au boot, on ne fait rien.
+        """
+        st = await asyncio.to_thread(self.dh.state, self.drv.container)
+        if st.running:
+            return "déjà en marche"
+        await asyncio.to_thread(self.drv.start)
+        return "démarré"
+
+    async def _vm_shutdown(self, vmid: int) -> str:
+        await asyncio.to_thread(self.px.vm_shutdown, vmid, 300)
+        return f"ordre d'arret envoye a la VM {vmid}"
+
+    async def _node_shutdown(self) -> str:
+        await asyncio.to_thread(self.px.node_shutdown)
+        return "ordre d'arret envoye a l'hote"
+
+    async def _power_up(self) -> str:
         """Deux chemins, selon l'etat de la prise.
 
         Prise coupee  -> la rallumer suffit : le front montant du 5VSB declenche
