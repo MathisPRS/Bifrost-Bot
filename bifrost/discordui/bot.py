@@ -30,7 +30,7 @@ from ..games.registry import build as build_driver
 from ..core.state import Busy, Machine, State
 from ..infra import net
 from ..infra.dockerhost import DockerHost
-from ..infra.plug import PlugClient
+from ..infra.plugs import build as build_plugs
 from ..infra.proxmox import ProxmoxClient
 
 log = logging.getLogger(__name__)
@@ -100,7 +100,7 @@ class Bifrost(discord.Client):
 
         self.machine = Machine()
         self.store = Store(conf.backup_dest.parent / "bifrost.db")
-        self.plug = PlugClient(conf.plug, forbidden=conf.nas_plug)
+        self.plug, self.nas_plug = build_plugs(conf)
         self.px = ProxmoxClient(conf.proxmox)
         self.dh = DockerHost(conf.docker_host)
 

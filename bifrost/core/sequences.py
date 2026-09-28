@@ -40,13 +40,18 @@ class Orchestrator:
         # Memorise entre deux etapes d'une meme sequence.
         self._gen_before: int | None = None
         self._watts_before: float | None = None
+        self._started_at: datetime | None = None
 
     # --- sondes elementaires -------------------------------------------------
 
     async def _watts(self, phase: str) -> float | None:
-        w = await asyncio.to_thread(self.plug.read_power)
-        self.store.add_power(w, phase)
-        return w
+        return (await self._reading(phase)).watts
+
+    async def _reading(self, phase: str):
+        """Lecture complete de la prise, journalisee."""
+        r = await asyncio.to_thread(self.plug.read)
+        self.store.add_power(r.watts if r.ok else None, phase)
+        return r
 
     async def chk_power_above(self, threshold: float) -> Check:
         """La machine est-elle sous tension ? DEUX preuves, l'une suffit.
@@ -87,11 +92,13 @@ class Orchestrator:
 
         La seule vraie mesure absente reste la lecture qui echoue -> INCONNU.
         """
-        w = await self._watts("extinction")
-        if w is None:
-            return Check.unknown("lecture de la prise indisponible")
+        r = await self._reading("extinction")
+        if not r.ok or r.watts is None:
+            return Check.unknown(r.error or "lecture de la prise indisponible")
+        w = r.watts
         if w >= threshold:
             return Check.no(f"{w:.1f} W — la machine consomme encore")
+
         if self.conf.power.require_drop:
             avant = self._watts_before
             if avant is None:
@@ -101,6 +108,19 @@ class Orchestrator:
                 return Check.unknown(
                     f"consommation initiale de {avant:.1f} W trop basse : "
                     "la prise ne mesurait peut-être déjà rien")
+
+            # La valeur a-t-elle ete rafraichie PENDANT cette sequence ?
+            # Via Home Assistant on lit un etat memorise, et LocalTuya ne
+            # remonte qu'au changement : un « 0 W » anterieur au debut de la
+            # sequence peut donc etre un vestige, pas une mesure. Exiger qu'il
+            # soit posterieur, c'est exiger d'avoir VU la chute se produire.
+            if self._started_at is not None and r.measured_at is not None:
+                if r.measured_at < self._started_at:
+                    age = (datetime.now(timezone.utc) - r.measured_at).total_seconds()
+                    return Check.unknown(
+                        f"{w:.1f} W mais mesure antérieure au début de la séquence "
+                        f"(il y a {age / 60:.0f} min) — chute pas encore constatée")
+
             return Check.yes(f"{avant:.1f} W → {w:.1f} W")
         return Check.yes(f"{w:.1f} W")
 
@@ -117,10 +137,14 @@ class Orchestrator:
         autant ne rien commencer. La porte reessaie, un echec isole ne doit pas
         condamner la sequence.
         """
-        w = await self._watts("avant")
-        if w is None:
-            return Check.unknown("lecture de la prise indisponible")
+        r = await self._reading("avant")
+        if not r.ok or r.watts is None:
+            return Check.unknown(r.error or "lecture de la prise indisponible")
+        w = r.watts
         self._watts_before = w
+        # Repere temporel de la sequence : la preuve d'extinction exigera une
+        # mesure posterieure a cet instant.
+        self._started_at = datetime.now(timezone.utc)
         if w < self.conf.power.on_threshold_w:
             return Check.no(
                 f"{w:.1f} W — la prise ne mesure deja presque rien, "

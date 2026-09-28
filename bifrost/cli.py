@@ -19,7 +19,7 @@ from .config import load
 from .games.valheim import ValheimDriver
 from .infra import net
 from .infra.dockerhost import DockerHost
-from .infra.plug import PlugClient
+from .infra.plugs import build as build_plugs
 from .infra.proxmox import ProxmoxClient
 
 OK, KO, UNK = "\033[32m●\033[0m", "\033[31m●\033[0m", "\033[33m●\033[0m"
@@ -43,7 +43,7 @@ def cmd_status(conf) -> int:
     print(f"\n\033[1mBifrost — etat au {now.astimezone():%H:%M:%S}\033[0m\n")
 
     # --- prise ---------------------------------------------------------------
-    plug = PlugClient(conf.plug, forbidden=conf.nas_plug)
+    plug, _ = build_plugs(conf)
     r = plug.read()
     mark = OK if r.ok else UNK
     print(f"  {mark} \033[1mPrise\033[0m {conf.plug.ip}   {r}")
@@ -150,7 +150,7 @@ def cmd_status(conf) -> int:
 
 def cmd_power(conf, seconds: int, interval: float) -> int:
     """Releve la courbe de consommation. Sert a calibrer les seuils (phase 4)."""
-    plug = PlugClient(conf.plug, forbidden=conf.nas_plug)
+    plug, _ = build_plugs(conf)
     print(f"releve pendant {seconds} s, toutes les {interval} s — Ctrl-C pour arreter\n")
     t0 = time.time()
     vals: list[float] = []

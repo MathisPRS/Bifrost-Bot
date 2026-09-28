@@ -53,12 +53,22 @@ class PlugReading:
     volts: float | None = None
     milliamps: int | None = None
     error: str | None = None
+    # Quand la mesure de puissance a ete rafraichie. En Tuya direct c'est
+    # l'instant de la lecture ; via HA c'est `last_reported` de l'entite.
+    measured_at: datetime | None = None
 
     def __str__(self) -> str:
         if not self.ok:
             return f"lecture indisponible ({self.error})"
         etat = "allumee" if self.on else "eteinte"
-        return f"{etat}, {self.watts:.1f} W, {self.volts:.1f} V, {self.milliamps} mA"
+        w = f"{self.watts:.1f} W" if self.watts is not None else "? W"
+        v = f"{self.volts:.1f} V" if self.volts is not None else "? V"
+        age = ""
+        if self.measured_at is not None:
+            s = (datetime.now(timezone.utc) - self.measured_at).total_seconds()
+            if s > 90:
+                age = f" (mesure d'il y a {s / 60:.0f} min)"
+        return f"{etat}, {w}, {v}, {self.milliamps} mA{age}"
 
 
 class PlugClient:
@@ -184,6 +194,7 @@ class PlugClient:
         return PlugReading(
             ok=True,
             at=now,
+            measured_at=now,          # lecture directe : toujours fraiche
             on=bool(dps[DPS_SWITCH]),
             watts=tenth(DPS_POWER_DW),
             volts=tenth(DPS_VOLTAGE_DV),

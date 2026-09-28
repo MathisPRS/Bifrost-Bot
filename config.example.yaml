@@ -32,6 +32,67 @@ power:
   on_hold_s: 10
   settle_after_off_s: 15     # vidage des caches disque avant coupure
 
+plug: true      # confirme le 2026-09-17 : seul le Proxmox est sur cette prise
+
+  # Seuils CALIBRES sur des mesures reelles du 2026-09-17 :
+  #   machine en S5 ......................  0,0 W  <- la prise renvoie zero sous
+  #                                                   son seuil de resolution ;
+  #                                                   les 1-3 W du rail 5VSB ne
+  #                                                   sont pas mesurables
+  #   allumee, rien qui tourne ........... 11,0 W
+  #   allumee, Valheim en marche ......... 26,6 W
+  # Le plancher "allumee" est donc 11 W, pas 26 : ne pas calibrer le seuil de
+  # demarrage sur une machine qui fait tourner le jeu.
+  off_threshold_w: 5.0       # sous ce seuil = machine eteinte
+  on_threshold_w: 5.0        # au-dessus = machine sous tension
+  # Plus de plancher : 0,0 W est une valeur LEGITIME sur ce materiel. La seule
+  # vraie "mesure absente" est une lecture qui echoue, deja traitee en INCONNU.
+  require_drop: true         # exiger une chute observee, pas une valeur absolue
+
+  # Durees de maintien : une condition doit TENIR, pas seulement apparaitre.
+  off_hold_s: 30             # anti-rebond d'un cycle de redemarrage
+  on_hold_s: 10
+  settle_after_off_s: 15     # vidage des caches disque avant coupure
+
+plug:
+  # « ha » = tout passe par Home Assistant · « tuya » = dialogue direct.
+  #
+  # Un appareil Tuya n'accepte qu'UNE session de controle locale a la fois. HA
+  # en tient une en permanence via LocalTuya ; quand Bifrost en ouvrait une
+  # seconde avec tinytuya, les deux se disputaient le meme socket — d'ou les
+  # commandes perdues en silence et les erreurs 914 de septembre 2026.
+  # Un seul programme parle au materiel, et c'est HA.
+  backend: ha
+
+  # Plafond de DERNIER RECOURS, pas un controle de fraicheur.
+  #
+  # LocalTuya ne sonde pas : il ne remonte qu'au changement. Un interrupteur
+  # allume depuis deux heures a donc legitimement un horodatage de deux heures,
+  # et une consommation stable ne produit aucun evenement. L'age n'est donc PAS
+  # un signal de fraicheur ici — s'en servir comme tel rejette des valeurs
+  # parfaitement justes.
+  #
+  # Le vrai signal d'integration morte, c'est l'etat `unavailable` que LocalTuya
+  # pose quand il perd l'appareil, et il est deja traite comme INCONNU.
+  # Et la vraie preuve de fraicheur, pour l'extinction, c'est d'exiger une mesure
+  # POSTERIEURE au debut de la sequence : voir chk_power_below().
+  max_age_s: 86400
+
+  proxmox:
+    switch:  switch.ma_prise
+    power:   sensor.ma_prise_puissance
+    voltage: sensor.ma_prise_tension
+    current: sensor.ma_prise_courant
+
+  nas:
+    # Pas d'entite `switch` : LocalTuya n'expose cette prise qu'en capteur.
+    # HA est donc STRUCTURELLEMENT incapable de couper le NAS — un garde-fou
+    # meilleur qu'un controle logiciel, il ne depend pas de notre code.
+    power:   sensor.prise_protegee_puissance
+    voltage: sensor.prise_protegee_tension
+    current: sensor.prise_protegee_courant
+    read_only: true
+
 proxmox:
   node: pve            # nom du node Proxmox
   vmid: 100                  # VM "Docker" — porte les serveurs de jeu

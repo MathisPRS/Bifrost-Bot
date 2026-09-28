@@ -117,6 +117,13 @@ class Conf:
     backup_keep_days: int
     backup_min_size_ratio: float
     discord: DiscordConf | None = None
+    # Prises : backend et entites Home Assistant (cf. bifrost/infra/plugs.py)
+    plug_backend: str = "tuya"
+    plug_max_age_s: int = 60
+    ha_url: str = ""
+    ha_token: str = ""
+    ha_plug_proxmox: dict = field(default_factory=dict)
+    ha_plug_nas: dict = field(default_factory=dict)
     games: dict[str, GameConf] = field(default_factory=dict)
     status_refresh_s: int = 60
     countdown_s: int = 60
@@ -207,6 +214,18 @@ def load(root: Path = ROOT) -> Conf:
     except (ConfigError, ValueError):
         dconf = None
 
+    pl = y.get("plug") or {}
+
+    def entites(bloc: dict) -> dict:
+        """Ne garde que les champs connus de HAPlugConf, pour qu'une clef en
+        trop dans le YAML donne une erreur claire plutot qu'un TypeError."""
+        permis = ("switch", "power", "voltage", "current", "read_only")
+        inconnues = set(bloc) - set(permis)
+        if inconnues:
+            raise ConfigError(
+                f"config.yaml, section plug : clef(s) inconnue(s) {sorted(inconnues)}")
+        return {k: bloc[k] for k in permis if k in bloc}
+
     b = y["backup"]
     dest = Path(b["dest"])
     if not (dest.is_absolute() and dest.parent.exists()):
@@ -227,6 +246,12 @@ def load(root: Path = ROOT) -> Conf:
         backup_keep_days=int(b["keep_days"]),
         backup_min_size_ratio=float(b["min_size_ratio"]),
         discord=dconf,
+        plug_backend=str(pl.get("backend", "tuya")).lower(),
+        plug_max_age_s=int(pl.get("max_age_s", 60)),
+        ha_url=(env.get("HA_URL") or "").strip().rstrip("/"),
+        ha_token=(env.get("HA_TOKEN") or "").strip(),
+        ha_plug_proxmox=entites(pl.get("proxmox") or {}),
+        ha_plug_nas=entites(pl.get("nas") or {}),
         games=games,
         status_refresh_s=int(y["discord"]["status_refresh_s"]),
         countdown_s=int(y["discord"]["countdown_s"]),
