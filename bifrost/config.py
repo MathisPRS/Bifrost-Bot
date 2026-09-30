@@ -33,17 +33,6 @@ def _req(src: dict, key: str) -> str:
 
 
 @dataclass(frozen=True)
-class PlugConf:
-    ip: str
-    dev_id: str
-    local_key: str
-    version: float
-    # Verrou structurel : la prise du NAS est declaree en lecture seule ici, et
-    # PlugClient refuse toute ecriture sur une instance read_only.
-    read_only: bool = False
-
-
-@dataclass(frozen=True)
 class ProxmoxConf:
     host: str
     token_id: str
@@ -74,7 +63,6 @@ class PowerConf:
     nas_on_separate_plug: bool
     off_threshold_w: float
     on_threshold_w: float
-    floor_min_w: float
     require_drop: bool
     off_hold_s: int
     on_hold_s: int
@@ -91,6 +79,16 @@ class PowerConf:
 
 
 @dataclass(frozen=True)
+class HAConf:
+    """Home Assistant : le seul chemin vers les prises."""
+    url: str
+    token: str
+    max_age_s: int
+    proxmox: dict              # entités de la prise pilotable
+    nas: dict                  # entités de la prise protégée (sans switch)
+
+
+@dataclass(frozen=True)
 class DiscordConf:
     token: str
     guild_id: int
@@ -104,8 +102,6 @@ class DiscordConf:
 
 @dataclass(frozen=True)
 class Conf:
-    plug: PlugConf
-    nas_plug: PlugConf | None
     proxmox: ProxmoxConf
     power: PowerConf
     host_ip: str
@@ -117,13 +113,7 @@ class Conf:
     backup_keep_days: int
     backup_min_size_ratio: float
     discord: DiscordConf | None = None
-    # Prises : backend et entites Home Assistant (cf. bifrost/infra/plugs.py)
-    plug_backend: str = "tuya"
-    plug_max_age_s: int = 60
-    ha_url: str = ""
-    ha_token: str = ""
-    ha_plug_proxmox: dict = field(default_factory=dict)
-    ha_plug_nas: dict = field(default_factory=dict)
+    ha: HAConf | None = None
     games: dict[str, GameConf] = field(default_factory=dict)
     status_refresh_s: int = 60
     countdown_s: int = 60
@@ -137,31 +127,6 @@ def load(root: Path = ROOT) -> Conf:
     env = {**dotenv_values(root / "secrets.env"), **os.environ}
     with open(root / "config.yaml", encoding="utf-8") as fh:
         y = yaml.safe_load(fh)
-
-    plug = PlugConf(
-        ip=_req(env, "TUYA_PLUG_IP"),
-        dev_id=_req(env, "TUYA_PLUG_ID"),
-        local_key=_req(env, "TUYA_PLUG_LOCAL_KEY"),
-        version=float(env.get("TUYA_PLUG_VERSION") or 3.5),
-    )
-
-    # La prise du NAS n'est chargee que si son IP est connue, et toujours en
-    # lecture seule : le bot tourne dessus.
-    nas_ip = (env.get("TUYA_NAS_PLUG_IP") or "").strip()
-    nas_plug = (
-        PlugConf(
-            ip=nas_ip,
-            dev_id=_req(env, "TUYA_NAS_PLUG_ID"),
-            local_key=_req(env, "TUYA_NAS_PLUG_LOCAL_KEY"),
-            version=float(env.get("TUYA_NAS_PLUG_VERSION") or 3.5),
-            read_only=True,
-        )
-        if nas_ip
-        else None
-    )
-
-    if plug.dev_id == (nas_plug.dev_id if nas_plug else None):
-        raise ConfigError("la prise pilotee et la prise du NAS ont le meme dev_id")
 
     px = y["proxmox"]
     proxmox = ProxmoxConf(
@@ -181,7 +146,6 @@ def load(root: Path = ROOT) -> Conf:
         nas_on_separate_plug=bool(p["nas_on_separate_plug"]),
         off_threshold_w=float(p["off_threshold_w"]),
         on_threshold_w=float(p["on_threshold_w"]),
-        floor_min_w=float(p.get("floor_min_w", 0.0)),
         require_drop=bool(p.get("require_drop", True)),
         off_hold_s=int(p["off_hold_s"]),
         on_hold_s=int(p["on_hold_s"]),
@@ -217,14 +181,30 @@ def load(root: Path = ROOT) -> Conf:
     pl = y.get("plug") or {}
 
     def entites(bloc: dict) -> dict:
-        """Ne garde que les champs connus de HAPlugConf, pour qu'une clef en
+        """Ne garde que les champs connus de PlugEntities, pour qu'une clef en
         trop dans le YAML donne une erreur claire plutot qu'un TypeError."""
-        permis = ("switch", "power", "voltage", "current", "read_only")
+        permis = ("switch", "power", "voltage", "current")
         inconnues = set(bloc) - set(permis)
         if inconnues:
             raise ConfigError(
                 f"config.yaml, section plug : clef(s) inconnue(s) {sorted(inconnues)}")
         return {k: bloc[k] for k in permis if k in bloc}
+
+    ha = HAConf(
+        url=_req(env, "HA_URL").rstrip("/"),
+        token=_req(env, "HA_TOKEN"),
+        max_age_s=int(pl.get("max_age_s", 86400)),
+        proxmox=entites(pl.get("proxmox") or {}),
+        nas=entites(pl.get("nas") or {}),
+    )
+    if not ha.proxmox.get("switch"):
+        raise ConfigError(
+            "config.yaml, plug.proxmox : il faut une entite `switch`, "
+            "sinon la prise n'est pas pilotable")
+    if ha.nas.get("switch"):
+        raise ConfigError(
+            "config.yaml, plug.nas : cette prise ne doit PAS avoir d'entite "
+            "`switch` — c'est ce qui rend sa coupure impossible")
 
     b = y["backup"]
     dest = Path(b["dest"])
@@ -233,8 +213,6 @@ def load(root: Path = ROOT) -> Conf:
     dest.mkdir(parents=True, exist_ok=True)
 
     return Conf(
-        plug=plug,
-        nas_plug=nas_plug,
         proxmox=proxmox,
         power=power,
         host_ip=y["host"]["ip"],
@@ -246,12 +224,7 @@ def load(root: Path = ROOT) -> Conf:
         backup_keep_days=int(b["keep_days"]),
         backup_min_size_ratio=float(b["min_size_ratio"]),
         discord=dconf,
-        plug_backend=str(pl.get("backend", "tuya")).lower(),
-        plug_max_age_s=int(pl.get("max_age_s", 60)),
-        ha_url=(env.get("HA_URL") or "").strip().rstrip("/"),
-        ha_token=(env.get("HA_TOKEN") or "").strip(),
-        ha_plug_proxmox=entites(pl.get("proxmox") or {}),
-        ha_plug_nas=entites(pl.get("nas") or {}),
+        ha=ha,
         games=games,
         status_refresh_s=int(y["discord"]["status_refresh_s"]),
         countdown_s=int(y["discord"]["countdown_s"]),

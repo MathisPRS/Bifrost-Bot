@@ -96,7 +96,7 @@ class DockerHost:
             c = self._client().containers.get(name)
         except NotFound:
             return ContainerState(exists=False)
-        except DockerException as exc:
+        except DockerException:
             self.close()
             raise
         s = c.attrs.get("State", {})

@@ -55,14 +55,10 @@ plug: true      # confirme le 2026-09-17 : seul le Proxmox est sur cette prise
   settle_after_off_s: 15     # vidage des caches disque avant coupure
 
 plug:
-  # « ha » = tout passe par Home Assistant · « tuya » = dialogue direct.
-  #
-  # Un appareil Tuya n'accepte qu'UNE session de controle locale a la fois. HA
-  # en tient une en permanence via LocalTuya ; quand Bifrost en ouvrait une
-  # seconde avec tinytuya, les deux se disputaient le meme socket — d'ou les
-  # commandes perdues en silence et les erreurs 914 de septembre 2026.
-  # Un seul programme parle au materiel, et c'est HA.
-  backend: ha
+  # Les prises sont pilotees UNIQUEMENT par Home Assistant. Une prise Tuya
+  # n'accepte qu'une session de controle locale a la fois : HA en tient une en
+  # permanence via LocalTuya, et toute seconde session entre en conflit avec
+  # elle. Un seul programme parle au materiel.
 
   # Plafond de DERNIER RECOURS, pas un controle de fraicheur.
   #
@@ -85,13 +81,12 @@ plug:
     current: sensor.ma_prise_courant
 
   nas:
-    # Pas d'entite `switch` : LocalTuya n'expose cette prise qu'en capteur.
-    # HA est donc STRUCTURELLEMENT incapable de couper le NAS — un garde-fou
-    # meilleur qu'un controle logiciel, il ne depend pas de notre code.
+    # AUCUNE entite `switch` ici, et le chargement de la configuration le
+    # REFUSE si on en ajoute une : c'est ce qui rend la coupure du NAS
+    # impossible. Un garde-fou qui ne depend pas de la correction du code.
     power:   sensor.prise_protegee_puissance
     voltage: sensor.prise_protegee_tension
     current: sensor.prise_protegee_courant
-    read_only: true
 
 proxmox:
   node: pve            # nom du node Proxmox

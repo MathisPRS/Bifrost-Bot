@@ -4,7 +4,7 @@ Rien de specifique a un jeu dans ce fichier : il ne parle qu'au protocole
 GameDriver. Les seules choses qu'il sait, c'est l'ordre des etapes et ce qu'il
 faut prouver avant de passer a la suivante.
 
-Toute la couche infra est synchrone (requests, SDK docker, tinytuya). On la
+Toute la couche infra est synchrone (requests, SDK docker). On la
 bascule dans un thread avec asyncio.to_thread plutot que de bloquer la boucle
 d'evenements de Discord — un /status ne doit jamais figer le bot pendant qu'une
 extinction est en cours.
@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from ..config import Conf
 from ..games.base import SaveInfo
 from ..infra.dockerhost import DockerHost
-from ..infra.plug import PlugClient
+from ..infra.plug import Plug
 from ..infra.proxmox import ProxmoxClient
 from ..infra import net
 from .events import Store
@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 
 
 class Orchestrator:
-    def __init__(self, conf: Conf, driver, plug: PlugClient, px: ProxmoxClient,
+    def __init__(self, conf: Conf, driver, plug: Plug, px: ProxmoxClient,
                  dh: DockerHost, store: Store):
         self.conf = conf
         self.drv = driver
@@ -363,76 +363,6 @@ class Orchestrator:
         await asyncio.to_thread(net.wake_on_lan, self.conf.proxmox.mac)
         return f"prise déjà allumée — Wake-on-LAN envoyé à {self.conf.proxmox.mac}"
 
-    async def _ensure_vm(self) -> str:
-        """Demarre la VM seulement si elle est reellement a l'arret.
-
-        En temps normal elle revient seule : `onboot: 1` est un drapeau statique
-        que Proxmox relit a chaque demarrage de l'hote, sans memoire de la
-        maniere dont la VM s'etait arretee. Ce filet ne sert donc qu'au cas ou
-        l'autostart serait desactive ou aurait echoue.
-
-        On ne touche a rien tant que l'etat n'est pas franchement `stopped` :
-        un `qm start` lance sur une VM en cours de demarrage se heurterait au
-        verrou de tache, et on ne veut pas transformer un demarrage normal en
-        echec de sequence.
-        """
-        v = await asyncio.to_thread(self.px.vm, self.conf.proxmox.vmid)
-        if v is None:
-            return "état indéterminé — on laisse la porte trancher"
-        if v.status != "stopped":
-            return f"{v.status} — autostart en cours, on laisse faire"
-        try:
-            await asyncio.to_thread(self.px.vm_start, self.conf.proxmox.vmid)
-            return "à l'arrêt malgré onboot — démarrage forcé"
-        except Exception as exc:                        # noqa: BLE001
-            # Souvent « already running » ou un verrou : la porte qui suit
-            # constatera l'etat reel de toute facon.
-            log.warning("demarrage VM refuse (%s) — la porte tranchera", exc)
-            return f"démarrage refusé ({type(exc).__name__}) — la porte tranchera"
-
-    async def _ensure_container(self) -> str:
-        """Demarre le conteneur s'il ne tourne pas deja.
-
-        Idempotent : si la VM l'a relance toute seule au boot, on ne fait rien.
-        """
-        st = await asyncio.to_thread(self.dh.state, self.drv.container)
-        if st.running:
-            return "déjà en marche"
-        await asyncio.to_thread(self.drv.start)
-        return "démarré"
-
-    async def _vm_shutdown(self, vmid: int) -> str:
-        await asyncio.to_thread(self.px.vm_shutdown, vmid, 300)
-        return f"ordre d'arret envoye a la VM {vmid}"
-
-    async def _node_shutdown(self) -> str:
-        await asyncio.to_thread(self.px.node_shutdown)
-        return "ordre d'arret envoye a l'hote"
-
-    async def _power_up(self) -> str:
-        """Deux chemins, selon l'etat de la prise.
-
-        Prise coupee  -> la rallumer suffit : le front montant du 5VSB declenche
-                         « Restore on AC Power Loss » et la machine boote.
-        Prise allumee -> la machine est en S5 sans que le courant ait jamais ete
-                         coupe. Aucun front montant ne viendra. C'est le paquet
-                         magique qui la reveille.
-        """
-        r = await asyncio.to_thread(self.plug.read)
-        if r.ok and r.on is False:
-            await asyncio.to_thread(self.plug.turn_on)
-            return "prise rallumee — demarrage au retour du courant"
-
-        if await asyncio.to_thread(self.px.reachable):
-            return "machine deja en marche"
-
-        if not self.conf.proxmox.mac:
-            raise RuntimeError(
-                "prise deja allumee et machine eteinte : il faut un paquet "
-                "Wake-on-LAN, mais PROXMOX_MAC n'est pas renseigne")
-        await asyncio.to_thread(net.wake_on_lan, self.conf.proxmox.mac)
-        return f"prise deja allumee — Wake-on-LAN envoye a {self.conf.proxmox.mac}"
-
     async def _plug_off(self) -> str:
         await asyncio.to_thread(self.plug.turn_off)
         return "prise coupee"
@@ -464,7 +394,6 @@ class Orchestrator:
         sauvegarde de fermeture. Si l'arret se passe mal, on a deja quelque chose
         en main.
         """
-        p = self.conf.power
         return [
             Stage("Aucun joueur connecté",
                   gate=Gate("Aucun joueur connecte", self.chk_no_players, timeout=10, interval=2)),

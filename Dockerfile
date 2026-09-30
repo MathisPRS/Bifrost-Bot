@@ -22,9 +22,9 @@ ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 HOME=/home/bifrost
 USER bifrost
 VOLUME ["/data"]
 
-# Verifie que la configuration se charge et que la prise repond. Ne modifie rien.
+# Verifie que la configuration se charge et que le canal de pilotage repond.
+# NE PARLE PAS a la prise : voir bifrost/health.py.
 HEALTHCHECK --interval=60s --timeout=20s --start-period=20s --retries=3 \
-  CMD python -c "from bifrost.config import load; from bifrost.infra.plug import PlugClient; \
-import sys; c=load(); sys.exit(0 if PlugClient(c.plug).read().ok else 1)"
+  CMD python -m bifrost.health
 
 CMD ["python", "-m", "bifrost"]

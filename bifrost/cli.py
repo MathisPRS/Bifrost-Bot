@@ -46,7 +46,7 @@ def cmd_status(conf) -> int:
     plug, _ = build_plugs(conf)
     r = plug.read()
     mark = OK if r.ok else UNK
-    print(f"  {mark} \033[1mPrise\033[0m {conf.plug.ip}   {r}")
+    print(f"  {mark} \033[1mPrise\033[0m {plug.describe()}   {r}")
     if r.ok and r.watts is not None:
         allowed, why = conf.power.cut_allowed()
         verrou = "coupure AUTORISEE" if allowed else f"coupure verrouillee — {why}"

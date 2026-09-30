@@ -55,10 +55,22 @@ quatre protocoles déjà présents :
 | joueurs, logs, arrêt du conteneur, extraction du monde | API Docker sur transport SSH | la VM tourne |
 | compte de joueurs, signal rapide | requête A2S UDP | le jeu tourne |
 | état / arrêt / démarrage VM et hôte | API Proxmox (token restreint) | l'hôte tourne |
-| la machine est-elle réellement éteinte | puissance de la prise | toujours |
+| la machine est-elle réellement éteinte | prise, via l'API Home Assistant | toujours |
 
 Ces canaux sont **emboîtés** : à chaque étage, il reste un observateur au-dessus pour
 constater ce qui s'est passé en dessous.
+
+La prise passe par **Home Assistant** plutôt que par un dialogue direct avec l'appareil.
+Une prise Tuya n'accepte qu'une session de contrôle locale à la fois : si une domotique
+en tient déjà une, une seconde entre en conflit avec elle — commandes perdues en
+silence, lectures erratiques, entités qui finissent par tomber. Un seul programme parle
+au matériel, et c'est celui qui sait tenir la connexion.
+
+On lit alors un **état mémorisé**, pas l'appareil. L'âge de cet état n'est pas pour
+autant un signal de fraîcheur : une intégration qui n'émet qu'au changement laisse
+vieillir un horodatage sans que la valeur soit fausse. La preuve d'extinction exige donc
+une mesure **postérieure au début de la séquence**, ce qui est la définition même de la
+chute qu'elle cherche à constater — et reste vrai si l'intégration se fige.
 
 La clé SSH est verrouillée dans `authorized_keys` sur la seule commande
 `docker system dial-stdio` : elle ne peut ni ouvrir de shell, ni rebondir ailleurs. Même

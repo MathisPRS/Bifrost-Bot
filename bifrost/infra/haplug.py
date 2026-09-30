@@ -1,13 +1,12 @@
-"""La prise, vue a travers Home Assistant.
+"""La prise, vue à travers Home Assistant. Unique implémentation de `Plug`.
 
-Meme interface que `PlugClient` (read / read_power / turn_on / turn_off), pour
-que l'orchestrateur ne sache pas par quel chemin il passe. Seule la fabrique
-`build_plug` choisit le backend.
+Trois invariants, les mêmes que partout ailleurs dans le projet :
 
-Les invariants ne changent pas, ce sont les memes depuis le debut :
-  - une lecture ratee, indisponible ou PERIMEE n'est jamais une valeur ;
-  - une ecriture doit etre confirmee par relecture, jamais supposee ;
-  - une prise declaree read_only refuse toute ecriture.
+  - une lecture ratée, indisponible ou non concluante n'est **jamais** une
+    valeur : elle se déclare inconnue ;
+  - une écriture n'est acquise que **confirmée par relecture**, jamais parce
+    qu'un appel HTTP a rendu 200 ;
+  - une prise déclarée sans interrupteur refuse toute écriture.
 """
 
 from __future__ import annotations
@@ -24,124 +23,124 @@ log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
-class HAPlugConf:
-    """Entites HA d'une prise. `switch` vide = prise non pilotable.
+class PlugEntities:
+    """Entités Home Assistant d'une prise.
 
-    C'est le cas de la prise du NAS : LocalTuya ne l'expose que comme capteur
-    binaire, pas comme interrupteur. HA est donc STRUCTURELLEMENT incapable de
-    la couper — un garde-fou meilleur qu'un controle logiciel, puisqu'il ne
-    depend pas de la correction de notre code.
+    `switch` vide = prise non pilotable. C'est le cas de la prise qui alimente
+    le NAS : LocalTuya ne l'expose qu'en capteur, sans interrupteur. Home
+    Assistant est donc **structurellement** incapable de la couper — un
+    garde-fou qui ne dépend pas de la correction de notre code.
     """
+
     nom: str
     switch: str = ""
     power: str = ""
     voltage: str = ""
     current: str = ""
-    read_only: bool = False
+
+    @property
+    def pilotable(self) -> bool:
+        return bool(self.switch)
 
 
 class HAPlug:
-    def __init__(self, ha: HAClient, conf: HAPlugConf):
+    def __init__(self, ha: HAClient, entities: PlugEntities):
         self.ha = ha
-        self.conf = conf
+        self.e = entities
+
+    def describe(self) -> str:
+        return self.e.switch or self.e.power or self.e.nom
 
     # --- lecture -------------------------------------------------------------
-
-    def resolve(self) -> str | None:
-        """Pas d'adresse a resoudre : HA s'en charge. On rend l'entite, pour
-        que les messages restent parlants."""
-        return self.conf.switch or self.conf.power or None
 
     def read(self) -> PlugReading:
         now = datetime.now(timezone.utc)
 
         on: bool | None = None
-        if self.conf.switch:
-            st = self.ha.state(self.conf.switch)
+        if self.e.switch:
+            st = self.ha.state(self.e.switch)
             if not st.ok:
                 return PlugReading(ok=False, at=now, error=st.error)
             on = st.value == "on"
 
         watts = volts = None
         milliamps = None
-        mesure_at = None
-        if self.conf.power:
-            st = self.ha.state(self.conf.power)
+        measured_at = None
+        if self.e.power:
+            st = self.ha.state(self.e.power)
             if not st.ok:
                 return PlugReading(ok=False, at=now, error=st.error)
             watts = st.as_float()
-            mesure_at = st.at
-            # Sans interrupteur expose (prise protegee), la consommation dit
-            # quand meme si elle debite.
+            measured_at = st.at
+            # Sans interrupteur exposé, la consommation dit quand même si la
+            # prise débite.
             if on is None:
                 on = bool(watts and watts > 0)
-        if self.conf.voltage:
-            v = self.ha.state(self.conf.voltage)
+
+        if self.e.voltage:
+            v = self.ha.state(self.e.voltage)
             volts = v.as_float() if v.ok else None
-        if self.conf.current:
-            c = self.ha.state(self.conf.current)
+        if self.e.current:
+            c = self.ha.state(self.e.current)
             a = c.as_float() if c.ok else None
             milliamps = int(a) if a is not None else None
 
-        return PlugReading(ok=True, at=now, on=on, watts=watts,
-                           volts=volts, milliamps=milliamps,
-                           measured_at=mesure_at)
+        return PlugReading(ok=True, at=now, on=on, watts=watts, volts=volts,
+                           milliamps=milliamps, measured_at=measured_at)
 
     def read_power(self) -> float | None:
         r = self.read()
         return r.watts if r.ok else None
 
-    # --- ecriture ------------------------------------------------------------
+    # --- écriture ------------------------------------------------------------
 
     def _guard(self) -> None:
-        if self.conf.read_only:
+        if not self.e.pilotable:
             raise PlugWriteDenied(
-                f"prise « {self.conf.nom} » déclarée en lecture seule")
-        if not self.conf.switch:
-            raise PlugWriteDenied(
-                f"prise « {self.conf.nom} » : aucune entité switch dans Home "
+                f"prise « {self.e.nom} » : aucune entité switch dans Home "
                 "Assistant, elle n'est pas pilotable")
 
-    def _command(self, on: bool, tries: int = 2) -> None:
-        """Commande puis CONFIRME par relecture.
+    def _command(self, on: bool, tries: int = 2, confirm_s: int = 10) -> None:
+        """Commande, puis **confirme par relecture**.
 
-        HA repond 200 des qu'il a accepte l'appel, pas quand l'appareil a
-        bascule. Le 200 n'est donc pas une preuve : seule la relecture en est
-        une. On laisse au passage le temps a HA de rafraichir son etat.
+        Home Assistant répond 200 dès qu'il a accepté l'appel, pas quand
+        l'appareil a basculé. Le 200 n'est donc pas une preuve : seule la
+        relecture en est une.
         """
+        ordre = "turn_on" if on else "turn_off"
         derniere = ""
+
         for essai in range(1, tries + 1):
             try:
-                self.ha.call("switch", "turn_on" if on else "turn_off",
-                             self.conf.switch)
+                self.ha.call("switch", ordre, self.e.switch)
             except HAError as exc:
                 derniere = str(exc)
                 log.warning("prise %s : essai %d/%d refusé par HA — %s",
-                            self.conf.nom, essai, tries, derniere)
+                            self.e.nom, essai, tries, derniere)
                 continue
 
-            for _ in range(10):           # jusqu'a ~10 s de confirmation
+            for _ in range(confirm_s):
                 time.sleep(1.0)
                 r = self.read()
                 if r.ok and r.on is on:
                     return
-                derniere = r.error or f"état toujours {'allumée' if r.on else 'éteinte'}"
+                derniere = r.error or (
+                    f"état toujours {'allumée' if r.on else 'éteinte'}")
             log.warning("prise %s : essai %d/%d non confirmé — %s",
-                        self.conf.nom, essai, tries, derniere)
+                        self.e.nom, essai, tries, derniere)
 
         raise PlugCommandFailed(
-            f"Home Assistant n'a pas confirmé l'ordre "
-            f"« {'allumer' if on else 'couper'} » sur {self.conf.switch} "
+            f"Home Assistant n'a pas confirmé « {ordre} » sur {self.e.switch} "
             f"après {tries} essais : {derniere}")
 
     def turn_on(self) -> bool:
         self._guard()
-        log.warning("prise %s : mise sous tension (via HA)", self.conf.nom)
+        log.warning("prise %s : mise sous tension", self.e.nom)
         self._command(True)
         return True
 
     def turn_off(self) -> bool:
         self._guard()
-        log.warning("prise %s : COUPURE (via HA)", self.conf.nom)
+        log.warning("prise %s : COUPURE", self.e.nom)
         self._command(False)
         return True
