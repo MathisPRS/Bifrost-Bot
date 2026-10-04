@@ -60,19 +60,6 @@ plug:
   # permanence via LocalTuya, et toute seconde session entre en conflit avec
   # elle. Un seul programme parle au materiel.
 
-  # Plafond de DERNIER RECOURS, pas un controle de fraicheur.
-  #
-  # LocalTuya ne sonde pas : il ne remonte qu'au changement. Un interrupteur
-  # allume depuis deux heures a donc legitimement un horodatage de deux heures,
-  # et une consommation stable ne produit aucun evenement. L'age n'est donc PAS
-  # un signal de fraicheur ici — s'en servir comme tel rejette des valeurs
-  # parfaitement justes.
-  #
-  # Le vrai signal d'integration morte, c'est l'etat `unavailable` que LocalTuya
-  # pose quand il perd l'appareil, et il est deja traite comme INCONNU.
-  # Et la vraie preuve de fraicheur, pour l'extinction, c'est d'exiger une mesure
-  # POSTERIEURE au debut de la sequence : voir chk_power_below().
-  max_age_s: 86400
 
   proxmox:
     switch:  switch.ma_prise

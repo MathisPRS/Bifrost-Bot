@@ -102,8 +102,9 @@ class Orchestrator:
         if self.conf.power.require_drop:
             avant = self._watts_before
             if avant is None:
-                return Check.unknown(
-                    "consommation initiale inconnue — chute invérifiable")
+                # Dispense posee par chk_initial_watts : la machine etait deja
+                # eteinte au depart, il n'y avait aucune chute a observer.
+                return Check.yes(f"{w:.1f} W — machine déjà éteinte au départ")
             if avant < self.conf.power.on_threshold_w:
                 return Check.unknown(
                     f"consommation initiale de {avant:.1f} W trop basse : "
@@ -145,11 +146,28 @@ class Orchestrator:
         # Repere temporel de la sequence : la preuve d'extinction exigera une
         # mesure posterieure a cet instant.
         self._started_at = datetime.now(timezone.utc)
-        if w < self.conf.power.on_threshold_w:
+
+        if w >= self.conf.power.on_threshold_w:
+            return Check.yes(f"{w:.1f} W")
+
+        # La prise ne mesure deja presque rien. Deux lectures possibles, et il
+        # faut les distinguer : soit le capteur ment, soit la machine est DEJA
+        # eteinte — typiquement une extinction interrompue en cours de route,
+        # qui laissait l'utilisateur coince (le 2026-10-04, un redemarrage du
+        # bot a tue une sequence et rendait /stop impossible a relancer).
+        #
+        # L'hote tranche. S'il ne repond pas, il n'y a plus rien a eteindre ni
+        # aucune chute a constater : on dispense la sequence d'en exiger une.
+        # La preuve devient « hote muet ET consommation basse », deux signaux
+        # independants qui concordent.
+        if not (await self.chk_host_down()).ok:
             return Check.no(
-                f"{w:.1f} W — la prise ne mesure deja presque rien, "
-                "la chute serait invérifiable")
-        return Check.yes(f"{w:.1f} W")
+                f"{w:.1f} W alors que l'hôte répond encore — mesure incohérente, "
+                "on ne touche à rien")
+        self._watts_before = None         # rien a comparer, et c'est assume
+        return Check.yes(
+            f"{w:.1f} W et hôte déjà muet — machine déjà éteinte, "
+            "il ne reste que la prise à couper")
 
     async def chk_host_up(self) -> Check:
         ping = await asyncio.to_thread(net.ping, self.conf.host_ip)

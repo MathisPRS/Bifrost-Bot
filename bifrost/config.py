@@ -83,7 +83,6 @@ class HAConf:
     """Home Assistant : le seul chemin vers les prises."""
     url: str
     token: str
-    max_age_s: int
     proxmox: dict              # entités de la prise pilotable
     nas: dict                  # entités de la prise protégée (sans switch)
 
@@ -193,7 +192,6 @@ def load(root: Path = ROOT) -> Conf:
     ha = HAConf(
         url=_req(env, "HA_URL").rstrip("/"),
         token=_req(env, "HA_TOKEN"),
-        max_age_s=int(pl.get("max_age_s", 86400)),
         proxmox=entites(pl.get("proxmox") or {}),
         nas=entites(pl.get("nas") or {}),
     )

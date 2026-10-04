@@ -12,9 +12,14 @@ décider de la fraîcheur dont elles ont besoin — celle de l'extinction exige 
 mesure postérieure au début de la séquence, ce qui est la définition même de la
 chute qu'elle cherche à constater.
 
-**Le vrai signal de panne, c'est `unavailable`**, que l'intégration pose quand
-elle perd l'appareil. Il est traité comme inconnu, et déclenche une tentative de
-remise en service : voir `_heal()`.
+**Les seuls signaux de panne** sont `unavailable`/`unknown`, que l'intégration pose
+quand elle perd l'appareil, et une API qui ne répond pas. Le premier est traité
+comme inconnu et déclenche une tentative de remise en service (`_heal()`).
+
+Il n'y a **aucun rejet sur l'âge**, à aucun seuil : un plafond, même très haut,
+finit toujours par refuser un état vrai. La fraîcheur dont l'extinction a besoin
+est obtenue autrement — en exigeant une mesure postérieure au début de la
+séquence, ce qui est la définition même de la chute qu'elle constate.
 """
 
 from __future__ import annotations
@@ -53,12 +58,9 @@ class HAState:
 
 class HAClient:
     def __init__(self, base_url: str, token: str, timeout: float = 8.0,
-                 max_age_s: int = 86400, heal_cooldown_s: int = 600):
+                 heal_cooldown_s: int = 600):
         self.base = base_url.rstrip("/")
         self.timeout = timeout
-        # Plafond de dernier recours : au-delà l'intégration est figée, pas
-        # lente. Ce n'est PAS un contrôle de fraîcheur — voir l'en-tête.
-        self.max_age_s = max_age_s
         self.heal_cooldown_s = heal_cooldown_s
         self._last_heal = 0.0
         self._s = requests.Session()
@@ -117,11 +119,13 @@ class HAClient:
         if at is None:
             return HAState(ok=False, error="horodatage absent de la réponse")
 
-        age = (datetime.now(timezone.utc) - at).total_seconds()
-        if age > self.max_age_s:
-            return HAState(ok=False, value=val, at=at, age_s=age,
-                           error=f"état figé depuis {age / 3600:.0f} h")
-        return HAState(ok=True, value=val, at=at, age_s=age)
+        # AUCUN rejet sur l'âge, à aucun seuil. Un interrupteur allumé depuis
+        # trois jours a un horodatage de trois jours, et c'est la vérité. Un
+        # plafond, même très haut, finit par rejeter un état parfaitement
+        # valide : c'est arrivé le 2026-10-04 avec 24 h, sur une prise allumée
+        # depuis 31 h. L'âge est rendu pour information, jamais pour juger.
+        return HAState(ok=True, value=val, at=at,
+                       age_s=(datetime.now(timezone.utc) - at).total_seconds())
 
     # --- écriture ------------------------------------------------------------
 
